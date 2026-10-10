@@ -6,3 +6,9 @@ description: "Static beer catalog + label generator for a home brewery, from a K
 
 route: /brewlog
 personal_data: false       # public brewery catalog, no auth needed — see infrastructure/compliance/brewlog.md
+
+# Releases (owner, 2026-10-10): only the owner decides when a new version is made. /deploy
+# refuses without --owner-release; every release gets a git tag on the release commit and a
+# GitHub release (infrastructure scripts/deploy.sh).
+release_by: owner
+github_release: true

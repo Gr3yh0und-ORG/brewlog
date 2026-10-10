@@ -11,6 +11,12 @@ in `infrastructure/scripts/deploy.sh`, not here. Don't duplicate it into this
 file; if something about deploy behavior needs to change, change it there so
 every project gets the fix.
 
+## 0. Only when the owner asked for a release
+
+This repo releases **only on the owner's command** (CLAUDE.md, `homelab.yml` `release_by: owner`).
+If the owner did not ask for a release in this conversation, stop here and ask. When they did,
+the real run needs `--owner-release`; it also creates the GitHub release.
+
 ## 1. Confirm before running
 
 **Ask before deploying — this reaches whoever uses the app.** Show what
