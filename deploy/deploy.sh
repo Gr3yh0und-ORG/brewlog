@@ -115,6 +115,15 @@ if [[ "$TARGET" == "public" || "$TARGET" == "both" ]]; then
     echo "  index.html"
     send_file "$WEB_DIR/index.html" "ftp://${FTP_HOST}${FTP_DIR}/index.html"
 
+    # 3a. Upload health.json (version + build time, WEBAPP_PROJECT_STANDARD §6a). Written by
+    # deploy/build.sh into dist/; the home-lab update check reads it from the live site.
+    if [ -f "$ROOT/dist/health.json" ]; then
+        echo "  health.json"
+        send_file "$ROOT/dist/health.json" "ftp://${FTP_HOST}${FTP_DIR}/health.json"
+    else
+        echo "  health.json missing (run deploy/build.sh) — skipped"
+    fi
+
     # 4. Upload favicon.svg
     echo "  favicon.svg"
     send_file "$WEB_DIR/favicon.svg" "ftp://${FTP_HOST}${FTP_DIR}/favicon.svg"
