@@ -402,10 +402,14 @@ def to_beerjson(sud, enr):
     }
 
 
-def load_sud(cur, sid):
+def load_sud(cur, sid, known_tables=None):
     """Load one Sud row plus all sub-tables into a dict."""
     cur.execute("SELECT * FROM Sud WHERE ID=?", (sid,))
     sud = clean_row(cur.fetchone())
+
+    if known_tables is None:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        known_tables = {r['name'].lower() for r in cur.fetchall()}
 
     for table, key, order in [
         ('Malzschuettung',      'malzschuettung',      'Prozent DESC'),
@@ -417,6 +421,11 @@ def load_sud(cur, sid):
         ('Bewertungen',         'bewertungen',          'Datum'),
         ('Tags',                'tags',                 'ID'),
     ]:
+        if table.lower() not in known_tables:
+            print(f"Warning: table '{table}' missing from database, "
+                  f"exporting '{key}' as empty")
+            sud[key] = []
+            continue
         cur.execute(f"SELECT * FROM {table} WHERE SudID=? ORDER BY {order}", (sid,))
         sud[key] = [clean_row(r) for r in cur.fetchall()]
 
@@ -432,8 +441,11 @@ def export():
     def load_enr(sudnummer):
         path = os.path.join(ENR_DIR, f'{sudnummer}.json')
         if os.path.exists(path):
-            with open(path, encoding='utf-8') as f:
-                return json.load(f)
+            try:
+                with open(path, encoding='utf-8') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"Warning: cannot read enrichment file {path} ({exc}), ignoring")
         return {}
 
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -479,6 +491,8 @@ def export():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    known_tables = {r['name'].lower() for r in cur.fetchall()}
 
     cur.execute("SELECT ID, Sudnummer, Sudname, Kategorie, Status, Braudatum, Abfuelldatum, "
                 "Menge, SW, IBU, erg_Farbe, erg_Alkohol, erg_Sudhausausbeute "
@@ -489,8 +503,11 @@ def export():
     for row in rows:
         sid  = row['ID']
         snum = row['Sudnummer']
+        if snum is None:
+            print(f"Warning: Sud ID {sid} has no Sudnummer, skipping")
+            continue
 
-        sud = load_sud(cur, sid)
+        sud = load_sud(cur, sid, known_tables)
         enr = load_enr(snum)
         enr.setdefault('images', img_map.get(snum, []))
         bj  = to_beerjson(sud, enr)

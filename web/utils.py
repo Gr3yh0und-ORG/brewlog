@@ -26,5 +26,10 @@ def load_env():
                 line = line.strip()
                 if line and not line.startswith('#') and '=' in line:
                     k, _, v = line.partition('=')
-                    env[k.strip()] = v.strip()
+                    v = v.strip()
+                    if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                        v = v[1:-1]                       # quoted value
+                    else:
+                        v = v.split(' #', 1)[0].strip()   # trailing comment
+                    env[k.strip()] = v
     return env
