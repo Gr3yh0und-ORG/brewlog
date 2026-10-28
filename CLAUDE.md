@@ -9,7 +9,7 @@ the owner explicitly asks for a release in the current conversation ("release", 
 
 When the owner asks for a release:
 
-1. Run `/deploy` (it calls `infrastructure/scripts/deploy.sh`). Show the `--dry-run` output first.
+1. Run `/deploy` (it calls `deploy/deploy.sh`). Show the `--dry-run` output first.
 2. The script needs `--owner-release` here (`homelab.yml`: `release_by: owner`). Pass it only for
    a release the owner asked for in this conversation.
 3. The script bumps VERSION, writes the CHANGELOG section, commits `chore(release): X.Y.Z`,

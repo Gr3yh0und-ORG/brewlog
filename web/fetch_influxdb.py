@@ -92,13 +92,16 @@ def _window_str(start_dt, end_dt, target_points=200):
 
 
 def _parse_dt(s):
-    """Parse ISO datetime string → UTC-aware datetime."""
+    """Parse ISO datetime string → UTC-aware datetime. None when unparseable."""
     if not s:
         return None
     try:
         dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
     except ValueError:
-        dt = datetime.fromisoformat(s[:10])
+        try:
+            dt = datetime.fromisoformat(s[:10])
+        except ValueError:
+            return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
@@ -213,8 +216,12 @@ def fetch_brew(query_api, snum):
         print(f'  #{snum}: BeerJSON not found, skipping')
         return False
 
-    with open(bj_path, encoding='utf-8') as f:
-        recipe = json.load(f)['beerjson']['recipes'][0]
+    try:
+        with open(bj_path, encoding='utf-8') as f:
+            recipe = json.load(f)['beerjson']['recipes'][0]
+    except (json.JSONDecodeError, KeyError, IndexError, OSError) as exc:
+        print(f'  #{snum}: cannot read {os.path.basename(bj_path)} ({exc}), skipping')
+        return False
 
     sb           = recipe.get('_brewery', {})
     braudatum    = sb.get('braudatum')
@@ -227,11 +234,17 @@ def fetch_brew(query_api, snum):
     expected_og  = (recipe.get('original_gravity') or {}).get('value') or 0
 
     start_dt = _parse_dt(braudatum)
+    if start_dt is None:
+        print(f'  #{snum}: unparseable braudatum {braudatum!r}, skipping')
+        return False
     now      = datetime.now(timezone.utc)
-    # Cap at 90 days when no abfuelldatum — prevents old brews with no end date from
-    # capturing years of subsequent iSpindel activity.
-    stop_dt  = (min(_parse_dt(abfuelldatum) + timedelta(days=2), now) if abfuelldatum
+    abf_dt   = _parse_dt(abfuelldatum) if abfuelldatum else None
+    # Cap at 90 days when no (usable) abfuelldatum — prevents old brews with no end
+    # date from capturing years of subsequent iSpindel activity.
+    stop_dt  = (min(abf_dt + timedelta(days=2), now) if abf_dt
                 else min(start_dt + timedelta(days=90), now))
+    # A data-entry error can put Abfuelldatum before Braudatum → empty range.
+    stop_dt  = max(stop_dt, start_dt + timedelta(days=1))
 
     print(f'  #{snum}: {recipe.get("name", "?")} '
           f'({braudatum[:10]} -> {str(stop_dt)[:10]})')
@@ -280,10 +293,14 @@ def main():
         print('Error: INFLUXDB_URL and INFLUXDB_TOKEN must be set in .env')
         sys.exit(1)
 
-    args = [a for a in sys.argv[1:] if a.isdigit()]
-    if args:
-        snums = [int(a) for a in args]
-    else:
+    snums = []
+    for a in sys.argv[1:]:
+        try:
+            snums.append(int(a))
+        except ValueError:
+            print(f'Error: invalid brew number {a!r}. Usage: python fetch_influxdb.py [n ...]')
+            sys.exit(1)
+    if not snums:
         idx_path = os.path.join(DATA_DIR, 'index.json')
         if not os.path.exists(idx_path):
             print('Error: web/data/index.json missing. Run: python export.py')

@@ -1,8 +1,13 @@
 import base64
+import contextlib
+import io
+import json
 import os
+import sys
 import tempfile
 import unittest
 import unittest.mock
+import xml.etree.ElementTree as ET
 
 import helpers  # sets up sys.path; must come before web imports
 import export as export_module
@@ -95,6 +100,75 @@ class TestLabels(unittest.TestCase):
         with open(os.path.join(self.out_dir, '1_a4.svg'), encoding='utf-8') as f:
             content = f.read()
         self.assertGreater(content.count('<g transform="translate(0,'), 1)
+
+    # ── robustness fixes (2026-10-28 review) ─────────────────────────
+
+    def _make_beerjson(self, data_dir, snum, name, sb):
+        os.makedirs(data_dir, exist_ok=True)
+        bj = {'beerjson': {'recipes': [{'name': name, '_brewery': sb}]}}
+        with open(os.path.join(data_dir, f'{snum}_beerjson.json'), 'w',
+                  encoding='utf-8') as f:
+            json.dump(bj, f)
+
+    def test_invalid_label_color_falls_back_to_default(self):
+        """A malformed label_color in the beerjson must not crash label generation."""
+        tmpdir = tempfile.mkdtemp()
+        data_dir = os.path.join(tmpdir, 'data')
+        out_dir  = os.path.join(tmpdir, 'labels')
+        self._make_beerjson(data_dir, 7, 'Bad Color',
+                            {'sudnummer': 7, 'label_color': 'red'})
+        with unittest.mock.patch.multiple(
+            labels_module,
+            DATA_DIR     = data_dir,
+            OUT_DIR      = out_dir,
+            LOGO_PATH    = '',
+            BREWERY_NAME = 'Test Brewery',
+            SITE_URL     = 'https://test.example.com',
+        ):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertTrue(labels_module.generate_label(7))
+        self.assertIn('label_color', stdout.getvalue())   # warned about
+        with open(os.path.join(out_dir, '7_label.svg'), encoding='utf-8') as f:
+            content = f.read()
+        ET.fromstring(content)   # valid XML
+
+    def test_name_with_dashes_produces_valid_svg(self):
+        """A beer name containing "--" must not break the XML comment in the SVG."""
+        tmpdir = tempfile.mkdtemp()
+        data_dir = os.path.join(tmpdir, 'data')
+        out_dir  = os.path.join(tmpdir, 'labels')
+        self._make_beerjson(data_dir, 8, 'Bad -- Name', {'sudnummer': 8})
+        with unittest.mock.patch.multiple(
+            labels_module,
+            DATA_DIR     = data_dir,
+            OUT_DIR      = out_dir,
+            LOGO_PATH    = '',
+            BREWERY_NAME = 'Test Brewery',
+            SITE_URL     = 'https://test.example.com',
+        ):
+            self.assertTrue(labels_module.generate_label(8))
+        for name in ('8_label.svg', '8_a4.svg'):
+            with open(os.path.join(out_dir, name), encoding='utf-8') as f:
+                ET.fromstring(f.read())   # raises if the comment broke the XML
+
+    def test_malformed_beerjson_returns_false(self):
+        tmpdir = tempfile.mkdtemp()
+        data_dir = os.path.join(tmpdir, 'data')
+        os.makedirs(data_dir)
+        with open(os.path.join(data_dir, '9_beerjson.json'), 'w',
+                  encoding='utf-8') as f:
+            f.write('{ not valid json')
+        with unittest.mock.patch.multiple(
+            labels_module, DATA_DIR=data_dir, OUT_DIR=os.path.join(tmpdir, 'labels'),
+        ):
+            self.assertFalse(labels_module.generate_label(9))
+
+    def test_main_rejects_non_numeric_args(self):
+        """A typo on the command line must exit with an error, not regenerate all."""
+        with unittest.mock.patch.object(sys, 'argv', ['generate_labels.py', '3l']):
+            with self.assertRaises(SystemExit):
+                labels_module.main()
 
 
 if __name__ == '__main__':

@@ -14,7 +14,7 @@ Print tip:
     Print the A4 SVG at actual size (no "fit to page").
     Each label = 210mm x 33mm, 9 labels per A4.
 """
-import json, math, os, sys, base64, html as htmllib
+import json, math, os, re, sys, base64, html as htmllib
 
 # -- Optional: QR code library ------------------------------------------------
 try:
@@ -226,8 +226,14 @@ def catmull_rom_path(pts):
 
 
 # -- Label SVG content --------------------------------------------------------
+_HEX_COLOR = re.compile(r'#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$')
+
 def draw_label(recipe, sb, logo_b64=None):
     bg       = sb.get('label_color') or '#D2CECE'
+    if not isinstance(bg, str) or not _HEX_COLOR.fullmatch(bg):
+        print(f'  #{sb.get("sudnummer", "?")}: invalid label_color {bg!r}, '
+              f"using default '#D2CECE'")
+        bg = '#D2CECE'
     mid_bg   = '#F5F1EB'            # parchment for the middle area
     txt_col  = text_color(mid_bg)   # dark text on light middle
     acc_col  = accent_color(bg)     # warm gold accent from label color
@@ -421,6 +427,9 @@ def draw_label(recipe, sb, logo_b64=None):
 
 
 def svg_wrapper(content, w_mm, h_mm, vb_w, vb_h, comment=''):
+    # XML comments may not contain "--"; neutralise it so a beer name can't
+    # produce malformed SVG.
+    comment = comment.replace('--', '-')
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         + (f'<!-- {comment} -->\n' if comment else '')
@@ -439,8 +448,12 @@ def generate_label(snum, logo_b64=None):
         print(f'  Not found: {fname}')
         return False
 
-    with open(fname, encoding='utf-8') as f:
-        bj = json.load(f)
+    try:
+        with open(fname, encoding='utf-8') as f:
+            bj = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f'  #{snum}: cannot read {os.path.basename(fname)} ({exc}), skipping')
+        return False
 
     recipe = bj['beerjson']['recipes'][0]
     sb     = recipe.get('_brewery', {})
@@ -478,10 +491,14 @@ def generate_label(snum, logo_b64=None):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a.isdigit()]
-    if args:
-        snums = [int(a) for a in args]
-    else:
+    snums = []
+    for a in sys.argv[1:]:
+        try:
+            snums.append(int(a))
+        except ValueError:
+            print(f'Error: invalid brew number {a!r}. Usage: python generate_labels.py [n ...]')
+            sys.exit(1)
+    if not snums:
         idx_path = os.path.join(DATA_DIR, 'index.json')
         if not os.path.exists(idx_path):
             print('Error: web/data/index.json missing. Run: python export.py')
