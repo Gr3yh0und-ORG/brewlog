@@ -16,6 +16,7 @@
 #                     no re-copy. Target "both" isn't valid with --rollback —
 #                     the two targets don't share a release history, so pick one.
 set -euo pipefail
+shopt -s nullglob
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -60,7 +61,12 @@ fi
 while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*# || -z "${line// /}" ]] && continue
     if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-        declare "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+        # Strip a trailing CR: a CRLF .env is common on the Windows path
+        # (deploy.ps1), and web/utils.py load_env() strips it too -- without
+        # this the two readers of the same file disagree and FTP logins fail
+        # on an invisible character.
+        v="${BASH_REMATCH[2]}"; v="${v%$'\r'}"
+        declare "${BASH_REMATCH[1]}=$v"
     fi
 done < "$ENV_FILE"
 
@@ -74,6 +80,15 @@ if $ROLLBACK; then
     fi
     exit $?
 fi
+
+# Fail here, with a named error, rather than with a raw `unbound variable`
+# from set -u after export and the snapshot have already run.
+for k in FTP_HOST FTP_USER FTP_PASS FTP_DIR LOGO_PNG; do
+    if [[ -z "${!k:-}" ]]; then
+        echo "Error: Missing $k in $ENV_FILE" >&2
+        exit 1
+    fi
+done
 
 urlencode() {
     python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$1"

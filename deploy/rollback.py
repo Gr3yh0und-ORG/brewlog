@@ -104,7 +104,10 @@ def list_releases():
     never sort as older than an earlier one that already got pruned."""
     if not RELEASES_DIR.exists():
         return []
-    return sorted((d for d in RELEASES_DIR.iterdir() if d.is_dir()), reverse=True)
+    # .tmp dirs only exist mid-copy (or after a kill -9); they're never releases.
+    return sorted((d for d in RELEASES_DIR.iterdir()
+                   if d.is_dir() and _SEQ_RE.match(d.name) and not d.name.endswith('.tmp')),
+                  reverse=True)
 
 
 def _next_sequence():
@@ -122,6 +125,8 @@ def snapshot_release(files=None):
     """Save `files` ({relative path: local Path}) as a new release, prune to KEEP_RELEASES."""
     if files is None:
         files = _release_files()
+    if not files:
+        raise RollbackError('no files to snapshot -- refusing to save an empty release')
 
     RELEASES_DIR.mkdir(parents=True, exist_ok=True)
     seq = _next_sequence()
@@ -130,12 +135,19 @@ def snapshot_release(files=None):
     while release_dir.exists():
         seq += 1
         release_dir = RELEASES_DIR / f'{seq:06d}-{stamp}'
-    release_dir.mkdir(parents=True)
-
-    for rel_path, local_path in files.items():
-        dest = release_dir / rel_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(Path(local_path).read_bytes())
+    # Copy into a .tmp dir and rename into place, so an interrupt mid-copy
+    # (Ctrl-C, full disk) can't leave a partial release as a rollback target.
+    tmp_dir = release_dir.with_name(release_dir.name + '.tmp')
+    tmp_dir.mkdir(parents=True)
+    try:
+        for rel_path, local_path in files.items():
+            dest = tmp_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(Path(local_path).read_bytes())
+        os.replace(tmp_dir, release_dir)
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
     for old in list_releases()[KEEP_RELEASES:]:
         shutil.rmtree(old)
@@ -157,6 +169,9 @@ def _ftp_mkdirs(ftp, remote_dir):
 
 
 def _ftp_upload_all(target, files, env):
+    for key in ('FTP_HOST', 'FTP_USER', 'FTP_PASS', 'FTP_DIR'):
+        if not env.get(key):
+            raise RollbackError(f'{key} is not set -- add it to the env file (see .env.example)')
     host = env['FTP_HOST']
     remote_base = env['FTP_DIR'].rstrip('/')
     ftp = ftplib.FTP(host)
@@ -170,7 +185,13 @@ def _ftp_upload_all(target, files, env):
             with open(f, 'rb') as fh:
                 ftp.storbinary(f'STOR {remote_path}', fh)
     finally:
-        ftp.quit()
+        # The first exception is the actionable one -- a server that closed
+        # the connection mid-error makes quit() raise EOFError/error_perm and
+        # would replace it.
+        try:
+            ftp.quit()
+        except Exception:
+            pass
 
 
 def do_rollback(steps_back=1, uploader=None, env=None):
@@ -179,6 +200,8 @@ def do_rollback(steps_back=1, uploader=None, env=None):
     releases[0] is the most recently deployed version; steps_back=1 (the
     default) re-publishes the release before it.
     """
+    if steps_back < 1:
+        raise RollbackError(f'steps_back must be >= 1, got {steps_back}')
     releases = list_releases()
     if len(releases) <= steps_back:
         raise RollbackError(
@@ -261,22 +284,43 @@ def publish_local(version=None, files=None, app_root=None, keep=KEEP_RELEASES):
     """
     if version is None:
         version = _version()
+    if not _VERSION_RE.match(version):
+        raise RollbackError(
+            f'VERSION {version!r} is not X.Y.Z -- refusing to publish a release '
+            f'that can never be picked as a rollback target'
+        )
     if files is None:
         files = _release_files()
+    if not files:
+        raise RollbackError('no files to publish -- refusing to create an empty release')
     app_root = _local_app_root(app_root)
 
     release_dir = app_root / 'releases' / version
-    release_dir.mkdir(parents=True, exist_ok=True)
-    for rel_path, local_path in files.items():
-        dest = release_dir / rel_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(Path(local_path).read_bytes())
+    # Build into <version>.tmp and swap into place, so re-publishing a version
+    # replaces the release instead of merging into it (a file deleted since the
+    # last publish must not keep being served under the "new" release).
+    tmp_dir = release_dir.with_name(version + '.tmp')
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True)
+    try:
+        for rel_path, local_path in files.items():
+            dest = tmp_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(Path(local_path).read_bytes())
 
-    if not any(p.is_file() for p in release_dir.rglob('*')):
-        raise RollbackError(
-            f'{release_dir} has no files after publish -- refusing to point current at it, '
-            f'previous release (if any) still live'
-        )
+        if not any(p.is_file() for p in tmp_dir.rglob('*')):
+            raise RollbackError(
+                f'{release_dir} has no files after publish -- refusing to point current at it, '
+                f'previous release (if any) still live'
+            )
+
+        if release_dir.exists():
+            shutil.rmtree(release_dir)
+        os.replace(tmp_dir, release_dir)
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
     _flip_current(app_root, version)
 
@@ -295,6 +339,8 @@ def do_local_rollback(steps_back=1, app_root=None):
     already pruned both resolve correctly instead of silently going back
     only one step or crashing on a missing directory.
     """
+    if steps_back < 1:
+        raise RollbackError(f'steps_back must be >= 1, got {steps_back}')
     app_root = _local_app_root(app_root)
     current_link = app_root / 'current'
     current_name = None
@@ -320,6 +366,17 @@ def do_local_rollback(steps_back=1, app_root=None):
     return target
 
 
+def _parse_steps_back(default=1):
+    """int(sys.argv[2]) with a friendly error instead of a ValueError traceback."""
+    if len(sys.argv) <= 2:
+        return default
+    try:
+        return int(sys.argv[2])
+    except ValueError:
+        print(f'Error: N must be a whole number of releases, got {sys.argv[2]!r}', file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -337,7 +394,7 @@ def main():
         for i, r in enumerate(releases):
             print(f'  [{i}] {r.name}' + (' (live)' if i == 0 else ''))
     elif cmd == 'rollback':
-        steps_back = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+        steps_back = _parse_steps_back()
         try:
             target, files = do_rollback(steps_back)
         except RollbackError as e:
@@ -366,7 +423,7 @@ def main():
         for r in releases:
             print(f'  {r.name}' + (' (live)' if r.name == current_name else ''))
     elif cmd == 'rollback-local':
-        steps_back = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+        steps_back = _parse_steps_back()
         try:
             target = do_local_rollback(steps_back)
         except RollbackError as e:

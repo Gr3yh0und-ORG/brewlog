@@ -1,5 +1,8 @@
+import ftplib
+import io
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -131,6 +134,141 @@ class TestRollback(unittest.TestCase):
         contents = sorted((r / 'index.html').read_text(encoding='utf-8') for r in releases)
         self.assertEqual(contents, sorted(f'content-{i}' for i in range(7, 12)))
 
+    # -- steps_back has a lower bound: a negative/zero value must never be
+    #    forwarded to the live FTP host (a negative index silently re-uploads
+    #    the oldest retained snapshot, 0 re-uploads the current one). --
+    def test_rollback_negative_steps_back_raises(self):
+        for i in range(3):
+            rollback.snapshot_release(self._write_source(str(i), f'content-{i}'))
+
+        uploaded = []
+        with self.assertRaises(rollback.RollbackError):
+            rollback.do_rollback(steps_back=-1, uploader=lambda t, f, e: uploaded.append(f), env={})
+        self.assertEqual(uploaded, [])
+
+    def test_rollback_zero_steps_back_raises(self):
+        for i in range(3):
+            rollback.snapshot_release(self._write_source(str(i), f'content-{i}'))
+
+        uploaded = []
+        with self.assertRaises(rollback.RollbackError):
+            rollback.do_rollback(steps_back=0, uploader=lambda t, f, e: uploaded.append(f), env={})
+        self.assertEqual(uploaded, [])
+
+    # -- Only NNNNNN-prefixed dirs are releases: a stray dir must not become
+    #    releases[0]/"(live)" nor shift every rollback index. --
+    def test_list_releases_ignores_non_sequence_dirs(self):
+        rollback.snapshot_release(self._write_source('a', 'first'))
+        rollback.snapshot_release(self._write_source('b', 'second'))
+        stray = rollback.RELEASES_DIR / 'backup'
+        (stray / 'images').mkdir(parents=True)
+        (stray / 'index.html').write_text('DO NOT SERVE', encoding='utf-8')
+
+        releases = rollback.list_releases()
+        self.assertNotIn(stray, releases)
+        self.assertEqual(len(releases), 2)
+
+        uploaded = {}
+        rollback.do_rollback(
+            steps_back=1,
+            uploader=lambda target, files, env: uploaded.update(
+                {f.name: f.read_text(encoding='utf-8') for f in files}
+            ),
+            env={},
+        )
+        self.assertEqual(uploaded['index.html'], 'first')
+
+    def test_snapshot_release_rejects_empty_files(self):
+        with self.assertRaises(rollback.RollbackError):
+            rollback.snapshot_release({})
+        # Nothing half-made was kept as a plausible rollback target.
+        self.assertEqual(rollback.list_releases(), [])
+
+    # -- An interrupted copy must not survive as a valid-looking release. --
+    def test_snapshot_release_interrupted_copy_leaves_no_release(self):
+        files = self._write_source('a', 'content-a')
+        files['favicon.svg'] = files['index.html']
+
+        calls = {'n': 0}
+        real_write_bytes = Path.write_bytes
+
+        def flaky_write_bytes(self, data):
+            calls['n'] += 1
+            if calls['n'] > 1:
+                raise OSError('disk full')
+            return real_write_bytes(self, data)
+
+        with unittest.mock.patch.object(Path, 'write_bytes', flaky_write_bytes):
+            with self.assertRaises(OSError):
+                rollback.snapshot_release(files)
+
+        self.assertEqual(rollback.list_releases(), [])
+        # Even an orphaned .tmp left behind (e.g. kill -9 before cleanup)
+        # must never count as a release.
+        orphan = rollback.RELEASES_DIR / '000099-20260101T000000.000000Z.tmp'
+        orphan.mkdir()
+        self.assertEqual(rollback.list_releases(), [])
+
+    def test_ftp_upload_all_names_missing_env_key(self):
+        target = self.tmpdir / 'rel'
+        target.mkdir()
+        f = target / 'index.html'
+        f.write_text('x', encoding='utf-8')
+
+        env = {'FTP_HOST': 'ftp.example', 'FTP_USER': 'u', 'FTP_DIR': '/site'}
+        with self.assertRaises(rollback.RollbackError) as cm:
+            rollback._ftp_upload_all(target, [f], env)
+        self.assertIn('FTP_PASS', str(cm.exception))
+
+    def test_ftp_quit_failure_does_not_mask_upload_error(self):
+        target = self.tmpdir / 'rel'
+        target.mkdir()
+        f = target / 'index.html'
+        f.write_text('x', encoding='utf-8')
+        env = {'FTP_HOST': 'h', 'FTP_USER': 'u', 'FTP_PASS': 'p', 'FTP_DIR': '/site'}
+
+        class FakeFtp:
+            def login(self, user, pw):
+                pass
+
+            def set_pasv(self, v):
+                pass
+
+            def mkd(self, path):
+                pass
+
+            def storbinary(self, cmd, fh):
+                raise ftplib.error_perm('552 disk full on server')
+
+            def quit(self):
+                raise EOFError('connection closed')
+
+        with unittest.mock.patch.object(rollback.ftplib, 'FTP', lambda host: FakeFtp()):
+            with self.assertRaises(ftplib.error_perm):
+                rollback._ftp_upload_all(target, [f], env)
+
+    def test_main_rejects_non_numeric_steps_back(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with unittest.mock.patch.object(sys, 'argv', ['rollback.py', 'rollback', 'notanumber']), \
+                unittest.mock.patch.object(sys, 'stdout', stdout), \
+                unittest.mock.patch.object(sys, 'stderr', stderr):
+            with self.assertRaises(SystemExit) as cm:
+                rollback.main()
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertIn('notanumber', stderr.getvalue())
+        self.assertNotIn('Traceback', stderr.getvalue())
+
+    def test_main_rejects_non_numeric_local_steps_back(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with unittest.mock.patch.object(sys, 'argv', ['rollback.py', 'rollback-local', '2x']), \
+                unittest.mock.patch.object(sys, 'stdout', stdout), \
+                unittest.mock.patch.object(sys, 'stderr', stderr):
+            with self.assertRaises(SystemExit) as cm:
+                rollback.main()
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertIn('2x', stderr.getvalue())
+        self.assertNotIn('Traceback', stderr.getvalue())
+
     def test_release_files_matches_actual_web_dir_layout(self):
         # _release_files() reads the real web/ dir (no monkeypatching) --
         # sanity-checks it against files this repo actually ships, so a
@@ -232,6 +370,42 @@ class TestLocalTarget(unittest.TestCase):
         rollback.publish_local(version='1.0.0', files=self._files('v1'), app_root=self.app_root)
         with self.assertRaises(rollback.RollbackError):
             rollback.do_local_rollback(steps_back=1, app_root=self.app_root)
+
+    # -- A negative steps_back would otherwise flip `current` forward. --
+    def test_local_rollback_negative_steps_back_raises(self):
+        rollback.publish_local(version='1.0.0', files=self._files('v1'), app_root=self.app_root)
+        rollback.publish_local(version='1.0.1', files=self._files('v2'), app_root=self.app_root)
+
+        with self.assertRaises(rollback.RollbackError):
+            rollback.do_local_rollback(steps_back=-1, app_root=self.app_root)
+        self.assertEqual(os.readlink(self.app_root / 'current'), 'releases/1.0.1')
+
+    def test_local_rollback_zero_steps_back_raises(self):
+        rollback.publish_local(version='1.0.0', files=self._files('v1'), app_root=self.app_root)
+        rollback.publish_local(version='1.0.1', files=self._files('v2'), app_root=self.app_root)
+
+        with self.assertRaises(rollback.RollbackError):
+            rollback.do_local_rollback(steps_back=0, app_root=self.app_root)
+        self.assertEqual(os.readlink(self.app_root / 'current'), 'releases/1.0.1')
+
+    def test_republish_same_version_replaces_not_merges(self):
+        files = {'index.html': self._files('v1')['index.html']}
+        src = self.tmpdir / 'src_extra'
+        src.mkdir()
+        stale = src / 'stale.html'
+        stale.write_text('removed image', encoding='utf-8')
+        rollback.publish_local(version='1.0.0', files={**files, 'stale.html': stale}, app_root=self.app_root)
+        rollback.publish_local(version='1.0.0', files=files, app_root=self.app_root)
+
+        release = self.app_root / 'releases' / '1.0.0'
+        self.assertTrue((release / 'index.html').is_file())
+        self.assertFalse((release / 'stale.html').exists(),
+                         'stale file from the previous publish survived into the new release')
+
+    def test_publish_local_rejects_malformed_version(self):
+        with self.assertRaises(rollback.RollbackError):
+            rollback.publish_local(version='1.2', files=self._files('v1'), app_root=self.app_root)
+        self.assertFalse((self.app_root / 'current').exists())
 
     def test_rollback_no_releases_raises(self):
         with self.assertRaises(rollback.RollbackError):
