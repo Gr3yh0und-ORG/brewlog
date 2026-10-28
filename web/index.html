@@ -1,4 +1,4 @@
-<!DOdeplht iCTYPE html>
+<!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="UTF-8">
@@ -659,7 +659,9 @@ function reapplyChipColors() {
 // ── Status ────────────────────────────────────────
 const STATUS_CLS = { 0:'st-0', 1:'st-1', 2:'st-2', 3:'st-3', 4:'st-4' };
 function getStatus(n) {
-  return { label: t('status_' + n) || t('status_3'), cls: STATUS_CLS[n] || 'st-3' };
+  // t() returns the key itself on a miss, so look the label up directly
+  const label = (window.T && window.T['status_' + n]) || t('status_3');
+  return { label, cls: STATUS_CLS[n] || 'st-3' };
 }
 
 const SRM_COLORS = [
@@ -696,6 +698,10 @@ function styleChipHTML(style) {
 
 function fmtDate(dt) {
   if (!dt) return '–';
+  // Date-only strings are parsed as UTC midnight by new Date(), which shifts
+  // the displayed day back in UTC-negative timezones; slice them manually.
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dt));
+  if (m) return `${m[3]}.${m[2]}.${m[1]}`;
   const d = new Date(dt);
   return isNaN(d) ? '–' : d.toLocaleDateString('de-DE', {day:'2-digit', month:'2-digit', year:'numeric'});
 }
@@ -705,17 +711,38 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+const NOTE_ALLOWED_TAGS = new Set(['B','I','EM','STRONG','BR','P','UL','OL','LI','A']);
+
+function sanitizeNoteNode(node, frag) {
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType === Node.TEXT_NODE) { frag.appendChild(child.cloneNode()); continue; }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue; // comments, etc.
+    const tag = child.tagName;
+    if (!NOTE_ALLOWED_TAGS.has(tag)) { sanitizeNoteNode(child, frag); continue; } // drop tag, keep content
+    const el = document.createElement(tag);
+    if (tag === 'A') {
+      const href = child.getAttribute('href') || '';
+      if (!/^https?:\/\//i.test(href)) { sanitizeNoteNode(child, frag); continue; }
+      el.setAttribute('href', href);
+      el.setAttribute('rel', 'noopener');
+    }
+    sanitizeNoteNode(child, el);
+    frag.appendChild(el);
+  }
+}
+
 function noteHTML(s) {
   if (!s) return '';
   const looksLikeHTML = /<[a-z][\s\S]*>/i.test(s);
   if (looksLikeHTML) {
-    // Strip dangerous elements/attributes, render the rest
-    return s
-      .replace(/<script\b[\s\S]*?<\/script>/gi, '')
-      .replace(/<style\b[\s\S]*?<\/style>/gi, '')
-      .replace(/\s+on\w+="[^"]*"/gi, '')
-      .replace(/\s+on\w+='[^']*'/gi, '')
-      .replace(/href\s*=\s*["']javascript:[^"']*["']/gi, '');
+    // Allowlist rebuild: only safe tags/attributes survive, everything else is dropped
+    const tpl = document.createElement('template');
+    tpl.innerHTML = s;
+    const frag = document.createDocumentFragment();
+    sanitizeNoteNode(tpl.content, frag);
+    const out = document.createElement('div');
+    out.appendChild(frag);
+    return out.innerHTML;
   }
   // Plain text: escape, linkify URLs, preserve line breaks
   return esc(s)
@@ -725,8 +752,9 @@ function noteHTML(s) {
 }
 
 function stars(n) {
-  if (!n) return '–';
-  return `<span class="stars">${'★'.repeat(Math.round(n))}${'☆'.repeat(Math.max(0,5-Math.round(n)))}</span>`;
+  if (n == null) return '–';
+  const r = Math.min(5, Math.max(0, Math.round(n)));
+  return `<span class="stars">${'★'.repeat(r)}${'☆'.repeat(5 - r)}</span>`;
 }
 
 // ── Radar chart ───────────────────────────────────
@@ -784,7 +812,10 @@ function catmullRomPath(pts) {
 
 function radarVals(tastes, sw, abv, ebc) {
   const tm = {};
-  (tastes || []).forEach(t => { tm[t.notes] = parseFloat(t.rating); });
+  (tastes || []).forEach(t => {
+    const v = parseFloat(t.rating);
+    if (!isNaN(v)) tm[t.notes] = Math.min(1, Math.max(0, v));
+  });
   return [
     tm['Bitterkeit'] ?? 0.5,
     tm['Frucht']     ?? 0.5,
@@ -889,16 +920,23 @@ function toggleLangPicker() {
 }
 
 function setLang(code) {
+  const prevLang = currentLang;
   currentLang = code;
   localStorage.setItem('lang', code);
   document.getElementById('langMenu').classList.remove('open');
   buildLangMenu();
   fetch(`i18n/${code}.json`)
-    .then(r => r.json())
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
     .then(lang => {
       window.T = lang;
       applyStaticTranslations();
       if (cachedIndex) init(cachedIndex);
+    })
+    .catch(() => {
+      // Translation file missing or malformed: revert to the previous language
+      currentLang = prevLang;
+      localStorage.setItem('lang', prevLang);
+      buildLangMenu();
     });
 }
 
@@ -922,9 +960,10 @@ function applyStaticTranslations() {
 // ── Bootstrap ─────────────────────────────────────
 Promise.all([
   fetch('data/index.json').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-  fetch(`i18n/${currentLang}.json`).then(r => r.json()).catch(() => ({})),
+  // Apply translations as soon as they arrive: if index.json fails,
+  // the error box below still renders translated text.
+  fetch(`i18n/${currentLang}.json`).then(r => r.json()).then(lang => { window.T = lang; return lang; }).catch(() => ({})),
 ]).then(([index, lang]) => {
-  window.T = lang;
   cachedIndex = index;
   buildLangMenu();
   applyStaticTranslations();
@@ -972,9 +1011,6 @@ function init(index) {
   const byStatus = {};
   allBeers.forEach(b => { byStatus[b.status] = (byStatus[b.status] || 0) + 1; });
 
-  document.getElementById('headerKpis').innerHTML =
-    `<div class="kpi-export">${t('exported_at')}<br>${index.exportiert}</div>`;
-
   // Status filter bar
   const statusFilters = [
     {key:'all', label: t('filter_all'),    count: allBeers.length},
@@ -982,6 +1018,7 @@ function init(index) {
     {key:'1',   label: t('status_1'),      count: byStatus[1]||0},
     {key:'2',   label: t('status_2'),      count: byStatus[2]||0},
     {key:'3',   label: t('status_3'),      count: byStatus[3]||0},
+    {key:'4',   label: t('status_4'),      count: byStatus[4]||0},
   ];
   const bar = document.getElementById('filterBar');
   bar.innerHTML = '';
@@ -1080,11 +1117,13 @@ function renderGrid(beers) {
     return;
   }
 
-  // Group by brew year; beers without braudatum → recipes group
+  // Group by brew year; beers without braudatum → recipes group.
+  // Slice the date string: new Date('YYYY-MM-DD') is UTC midnight and
+  // getFullYear() is local, which shifts the year in UTC-negative timezones.
   const RECIPE_KEY = '__recipes__';
   const groups = {};
   beers.forEach(b => {
-    const key = b.braudatum ? String(new Date(b.braudatum).getFullYear()) : RECIPE_KEY;
+    const key = b.braudatum ? String(String(b.braudatum).slice(0, 4)) : RECIPE_KEY;
     (groups[key] = groups[key] || []).push(b);
   });
 
@@ -1152,8 +1191,8 @@ function openDetail(sudnummer, file, noPush) {
   document.body.style.overflow = 'hidden';
 
   Promise.all([
-    fetch(`data/${file}`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-    fetch(`data/${sudnummer}_influxdb.json`).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`data/${encodeURIComponent(file)}`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
+    fetch(`data/${encodeURIComponent(String(sudnummer))}_influxdb.json`).then(r => r.ok ? r.json() : null).catch(() => null),
   ])
     .then(([bj, pd]) => renderDetail(bj, pd))
     .catch(err => {
@@ -1761,7 +1800,7 @@ function renderGallery(sb) {
   }).join('');
   return `<div class="data-section">
     <div class="section-title">${t('section_gallery')}</div>
-    <div class="gallery" id="gallery-imgs" data-images='${JSON.stringify(images)}'>${thumbs}</div>
+    <div class="gallery" id="gallery-imgs" data-images="${esc(JSON.stringify(images))}">${thumbs}</div>
   </div>`;
 }
 
