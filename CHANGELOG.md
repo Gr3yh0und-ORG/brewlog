@@ -5,6 +5,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), version
 
 ## [Unreleased]
 
+### Fixed
+- Review 2026-10-28, `deploy/`: rollback rejects `steps_back < 1` (a negative value re-uploaded the oldest snapshot); stray directories are not releases; `ftp.quit()` cannot mask the real error; snapshots and local publishes are built in a `.tmp` dir and swapped in; CRLF `.env` values, missing keys and unmatched globs give clear errors in `deploy.sh`.
+- `web/index.html`: corrupted doctype restored (the page rendered in quirks mode); `web/i18n/en.json` characters restored; note HTML goes through an allowlist; dates no longer shift by timezone; a bad language file is not kept; the "Discarded" filter button exists.
+- Python tools: `python -m pytest -q tests` collects (`tests/conftest.py`); a bad `label_color`, a bad date, a NULL `Sudnummer`, missing DB tables and broken JSON files no longer abort a run; `load_env` strips quotes and trailing comments; non-numeric CLI arguments stop with a usage message.
+
 ## [1.0.4] — 2026-09-26
 
 ### Added
