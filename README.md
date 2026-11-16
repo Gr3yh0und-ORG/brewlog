@@ -1,7 +1,7 @@
 # Brewlog for KBH2 (Web Frontend)
 
 [![CI](https://github.com/gr3yh0und/brewlog/actions/workflows/ci.yml/badge.svg)](https://github.com/gr3yh0und/brewlog/actions/workflows/ci.yml)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+[![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A static web frontend for the [Kleiner Brauhelfer 2](https://github.com/kleiner-brauhelfer/kleiner-brauhelfer-2) home brewery database. Reads `brauhelfer.sqlite`, exports BeerJSON + BeerXML files, generates SVG bottle labels, and deploys everything to a static web host via FTP.
